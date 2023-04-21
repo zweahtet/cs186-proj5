@@ -93,7 +93,22 @@ public class ARIESRecoveryManager implements RecoveryManager {
     @Override
     public long commit(long transNum) {
         // TODO(proj5): implement
-        return -1L;
+        TransactionTableEntry tableEntry = transactionTable.get(transNum);
+        Transaction xact = tableEntry.transaction;
+
+        // append the commit record
+        CommitTransactionLogRecord commitRecord = new CommitTransactionLogRecord(transNum, tableEntry.lastLSN);
+        long lsn = logManager.appendToLog(commitRecord);
+
+        // flush the log
+        logManager.flushToLSN(lsn);
+
+        // update the transaction table
+        tableEntry.lastLSN = lsn;
+
+        // update the transaction status
+        xact.setStatus(Transaction.Status.COMMITTING);
+        return logManager.getFlushedLSN();
     }
 
     /**
@@ -109,7 +124,19 @@ public class ARIESRecoveryManager implements RecoveryManager {
     @Override
     public long abort(long transNum) {
         // TODO(proj5): implement
-        return -1L;
+        TransactionTableEntry tableEntry = transactionTable.get(transNum);
+        Transaction xact = tableEntry.transaction;
+
+        // append the abort record
+        AbortTransactionLogRecord abortRecord = new AbortTransactionLogRecord(transNum, tableEntry.lastLSN);
+        long lsn = logManager.appendToLog(abortRecord);
+
+        // update the transaction table
+        tableEntry.lastLSN = lsn;
+
+        // update the transaction status
+        xact.setStatus(Transaction.Status.ABORTING);
+        return lsn;
     }
 
     /**
@@ -127,7 +154,23 @@ public class ARIESRecoveryManager implements RecoveryManager {
     @Override
     public long end(long transNum) {
         // TODO(proj5): implement
-        return -1L;
+        TransactionTableEntry tableEntry = transactionTable.get(transNum);
+        Transaction xact = tableEntry.transaction;
+
+        // any changes (undone) should be undone
+        LogRecord lastRecord = logManager.fetchLogRecord(tableEntry.lastLSN);
+        rollbackToLSN(transNum, lastRecord.getLSN());
+
+        // remove transaction from table
+        transactionTable.remove(transNum);
+
+        // append end record
+        EndTransactionLogRecord endRecord = new EndTransactionLogRecord(transNum, tableEntry.lastLSN);
+        long lsn = logManager.appendToLog(endRecord);
+
+        // update transaction status
+        xact.setStatus(Transaction.Status.COMPLETE);
+        return lsn;
     }
 
     /**
