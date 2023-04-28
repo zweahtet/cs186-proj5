@@ -2,12 +2,9 @@ package edu.berkeley.cs186.database.recovery;
 
 import edu.berkeley.cs186.database.Transaction;
 import edu.berkeley.cs186.database.common.Pair;
-import edu.berkeley.cs186.database.concurrency.DummyLockContext;
 import edu.berkeley.cs186.database.io.DiskSpaceManager;
 import edu.berkeley.cs186.database.memory.BufferManager;
-import edu.berkeley.cs186.database.memory.Page;
 import edu.berkeley.cs186.database.recovery.records.*;
-import jdk.jpackage.internal.Log;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
