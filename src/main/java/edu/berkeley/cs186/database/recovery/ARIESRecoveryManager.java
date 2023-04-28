@@ -636,7 +636,183 @@ public class ARIESRecoveryManager implements RecoveryManager {
         // Set of transactions that have completed
         Set<Long> endedTransactions = new HashSet<>();
         // TODO(proj5): implement
-        return;
+        // Begin scanning log records starting at the beginning of the last
+        // successful checkpoint
+        Iterator<LogRecord> logRecordIterator = logManager.scanFrom(LSN);
+        while (logRecordIterator.hasNext()) {
+            LogRecord logRecord = logRecordIterator.next();
+            LogType logType = logRecord.getType();
+
+            // if log record is for a transaction operation
+            if (logRecord.getTransNum().isPresent()) {
+                Long transNum = logRecord.getTransNum().get();
+
+                // if transaction is not in the table
+                if (!transactionTable.containsKey(transNum)) {
+                    // add it to the table
+                    Transaction newXact = newTransaction.apply(transNum);
+                    startTransaction(newXact);
+                }
+
+                TransactionTableEntry xactEntry= transactionTable.get(transNum);
+
+                // if log record for a change in xact status
+                Transaction xact = xactEntry.transaction;
+                switch (logType) {
+                    case COMMIT_TRANSACTION:
+                        xact.setStatus(Transaction.Status.COMMITTING);
+                        break;
+                    case ABORT_TRANSACTION:
+                        xact.setStatus(Transaction.Status.RECOVERY_ABORTING);
+                        break;
+                    case END_TRANSACTION:
+                        // transaction should be cleaned up
+                        xact.cleanup();
+
+                        // entry should be removed from the table
+                        transactionTable.remove(transNum);
+
+                        endedTransactions.add(xact.getTransNum());
+
+                        // set the transaction status
+                        xact.setStatus(Transaction.Status.COMPLETE);
+                }
+
+                // update the lastLSN of the trans
+                xactEntry.lastLSN = logRecord.getLSN();
+            }
+
+            // if log record is page-related
+            if (logRecord.getPageNum().isPresent()) {
+                Long pageNum = logRecord.getPageNum().get();
+
+                // Dirty page table (page number -> recLSN).
+                // update dirty page table (dpt) for
+                switch (logType) {
+                    case UPDATE_PAGE:
+                    case UNDO_UPDATE_PAGE:
+                        dirtyPage(pageNum, logRecord.getLSN());
+                        break;
+                    case FREE_PAGE:
+                    case UNDO_ALLOC_PAGE:
+                        dirtyPageTable.remove(pageNum);
+                        break;
+                    default:
+                        // No action needed for ALLOC_PAGE and UNDO_FREE_PAGE
+                        break;
+                }
+            }
+
+            // if log record in an end-checkpoint records
+            if (logType.equals(LogType.END_CHECKPOINT)) {
+                // copy all entries of checkpoint dpt
+                // Dirty page table (page number -> recLSN).
+                Map<Long, Long> chkDPT = logRecord.getDirtyPageTable();
+                Map<Long, Pair<Transaction.Status, Long>> chkptTxnTable = logRecord.getTransactionTable();
+
+                // Copy all entries of checkpoint DPT (replace existing entries if any)
+                for (Map.Entry<Long, Long> entry: chkDPT.entrySet()) {
+                    dirtyPageTable.put(entry.getKey(), entry.getValue());
+                }
+
+                // <transNum, Pair(trans status, entry lastLSN)>
+                // For each entry in the checkpoint's snapshot of the transaction table:
+                for (Map.Entry<Long, Pair<Transaction.Status, Long>> entry : chkptTxnTable.entrySet()) {
+                    Long chkTransNum = entry.getKey();
+                    Pair<Transaction.Status, Long> value = entry.getValue();
+                    Transaction.Status chkTransStatus = value.getFirst();
+                    Long chkTransLSN = value.getSecond();
+
+                    if (endedTransactions.contains(chkTransNum)) {
+                        continue; // skip ended xact
+                    }
+
+                    // add to transaction table if not already present
+                    if (!transactionTable.containsKey(chkTransNum)) {
+                        Transaction newXact = newTransaction.apply(chkTransNum);
+                        startTransaction(newXact);
+                    }
+
+                    // Update lastLSN to be the larger of the existing entry's
+                    // (if any) and the checkpoint's
+                    TransactionTableEntry transEntry = transactionTable.get(chkTransNum);
+                    if (chkTransLSN >= transEntry.lastLSN) {
+                        transEntry.lastLSN = chkTransLSN;
+                    }
+
+                    // Update status in the transaction table if possible
+                    // running -> committing -> complete
+                    // running -> aborting -> complete
+                    Transaction xact = transEntry.transaction;
+                    switch (xact.getStatus()) {
+                        case RUNNING:
+                            switch (chkTransStatus) {
+                                case COMMITTING:
+                                case COMPLETE:
+                                    xact.setStatus(chkTransStatus);
+                                    break;
+                                case ABORTING:
+                                    xact.setStatus(Transaction.Status.RECOVERY_ABORTING);
+                                    break;
+                                default:
+                                    break;
+                            }
+                            break;
+                        case COMMITTING:
+                        case ABORTING:
+                        case RECOVERY_ABORTING:
+                            switch (chkTransStatus) {
+                                case COMPLETE:
+                                    xact.setStatus(chkTransStatus);
+                                    break;
+                                default:
+                                    break;
+                            }
+                            break;
+                        default:
+                            break;
+                    }
+
+                }
+
+            }
+        }
+
+        // after all the records in the log are processed
+//        ArrayList<Long> toBeRemoved = new ArrayList<>();
+        for (Map.Entry<Long, TransactionTableEntry> entry: transactionTable.entrySet()) {
+            Long transNum = entry.getKey();
+            TransactionTableEntry transEntry = entry.getValue();
+            Transaction xact = transEntry.transaction;
+
+            // All transactions in the COMMITTING state should be
+            // ended (cleanup(), state set to COMPLETE, end transaction
+            // record written, and removed from the transaction table).
+            switch (xact.getStatus()) {
+                case COMMITTING:
+                    xact.cleanup();
+                    xact.setStatus(Transaction.Status.COMPLETE);
+                    transactionTable.remove(transNum);
+                    endedTransactions.add(transNum);
+                    EndTransactionLogRecord endRecord = new EndTransactionLogRecord(transNum, transEntry.lastLSN);
+                    long endLSN = logManager.appendToLog(endRecord);
+
+                    // update transaction status
+                    transEntry.lastLSN = endLSN;
+                    break;
+                case RUNNING:
+                    xact.setStatus(Transaction.Status.RECOVERY_ABORTING);
+                    AbortTransactionLogRecord abortRecord = new AbortTransactionLogRecord(transNum, transEntry.lastLSN);
+                    long abortLSN = logManager.appendToLog(abortRecord);
+
+                    // update transaction status
+                    transEntry.lastLSN = abortLSN;
+                    break;
+                default:
+                    // no action needed for recovery_aborting
+                    break;
+            }
+        }
     }
 
     /**
