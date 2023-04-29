@@ -2,8 +2,10 @@ package edu.berkeley.cs186.database.recovery;
 
 import edu.berkeley.cs186.database.Transaction;
 import edu.berkeley.cs186.database.common.Pair;
+import edu.berkeley.cs186.database.concurrency.DummyLockContext;
 import edu.berkeley.cs186.database.io.DiskSpaceManager;
 import edu.berkeley.cs186.database.memory.BufferManager;
+import edu.berkeley.cs186.database.memory.Page;
 import edu.berkeley.cs186.database.recovery.records.*;
 
 import java.util.*;
@@ -829,6 +831,69 @@ public class ARIESRecoveryManager implements RecoveryManager {
      */
     void restartRedo() {
         // TODO(proj5): implement
+        // find the starting point for the REDO from the dpt
+        // the lowest recLSN in dpt
+        Long startLSN = Long.MAX_VALUE;
+        for (Map.Entry<Long, Long> dptEntry: dirtyPageTable.entrySet()) {
+            if (dptEntry.getValue() < startLSN) {
+                startLSN = dptEntry.getValue();
+            }
+        }
+
+        // Scan from the starting point and redo eligible records
+        Iterator<LogRecord> logRecordIterator = logManager.scanFrom(startLSN);
+        while (logRecordIterator.hasNext()) {
+            LogRecord logRecord = logRecordIterator.next();
+
+            if (logRecord.isRedoable()) {
+                switch (logRecord.getType()) {
+                    // Redo partition-related records
+                    case ALLOC_PART:
+                    case UNDO_ALLOC_PART:
+                    case FREE_PART:
+                    case UNDO_FREE_PART:
+                    // Redo records that allocate a page
+                    case ALLOC_PAGE:
+                    case UNDO_FREE_PAGE:
+                        logRecord.redo(this, diskSpaceManager, bufferManager);
+                        break;
+                    // Redo records that modify a page
+                    case UPDATE_PAGE:
+                    case UNDO_UPDATE_PAGE:
+                    case UNDO_ALLOC_PAGE:
+                    case FREE_PAGE:
+                        // Dirty page table (page number -> recLSN).
+                        if (logRecord.getPageNum().isPresent()) {
+                            Long pageNum = logRecord.getPageNum().get();
+                            Long recLSN = logRecord.getLSN();
+
+
+                            // the page is in the DPT
+                            if (dirtyPageTable.containsKey(pageNum)) {
+                                // the record's LSN is greater than or equal to
+                                // the DPT's recLSN for that page.
+                                Long DPTRecLSN = dirtyPageTable.get(pageNum);
+                                if (recLSN >= DPTRecLSN) {
+                                    // the pageLSN on the page itself is strictly less
+                                    // than the LSN of the record.
+                                    Page page = bufferManager.fetchPage(new DummyLockContext(), pageNum);
+                                    try {
+                                        if (page.getPageLSN() < recLSN) {
+                                            logRecord.redo(this, diskSpaceManager, bufferManager);
+//                                            dptEntry.pageLSN = record.getLSN();
+                                        }
+                                    } finally {
+                                        page.unpin();
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
         return;
     }
 
