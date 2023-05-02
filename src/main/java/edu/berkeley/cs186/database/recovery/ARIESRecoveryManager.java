@@ -912,6 +912,32 @@ public class ARIESRecoveryManager implements RecoveryManager {
      */
     void restartUndo() {
         // TODO(proj5): implement
+        // Create a priority queue of lastLSN of all aborting transactions
+        PriorityQueue<Long> lastLSNs = new PriorityQueue<>(Collections.reverseOrder());
+
+        for (TransactionTableEntry entry : transactionTable.values()) {
+            if (entry.transaction.getStatus() == Transaction.Status.RECOVERY_ABORTING) {
+                lastLSNs.add(entry.lastLSN);
+            }
+        }
+
+        // Undo records until we are done
+        while (!lastLSNs.isEmpty()) {
+            Long LSN = lastLSNs.poll();
+            LogRecord logRecord = logManager.fetchLogRecord(LSN);
+            if (logRecord.isUndoable()) {
+                LogRecord clr = logRecord.undo(LSN);
+                Long clrLSN = logManager.appendToLog(clr);
+                if (clr.isRedoable()) {
+                    clr.redo(this, diskSpaceManager, bufferManager);
+                }
+            }
+
+            Optional<Long> undoNextLSN = logRecord.getUndoNextLSN();
+            Long newLSN = undoNextLSN.isPresent()?
+                    undoNextLSN.get(): logRecord.getPrevLSN().get();
+
+        }
         return;
     }
 
